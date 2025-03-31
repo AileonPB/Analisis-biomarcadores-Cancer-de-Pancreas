@@ -1,0 +1,1054 @@
+---
+title: "PRAC2 Biomarcadores en cáncer de páncreas"
+author: "Noelia Pérez Benavent y María Amparo Blanch Ruiz"
+date: ""
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+if(!require(ggplot2)){
+    install.packages('ggplot2', repos='http://cran.us.r-project.org')
+    library(ggplot2)
+}
+if(!require(dplyr)){
+    install.packages('dplyr', repos='http://cran.us.r-project.org')
+    library(dplyr)
+}
+if(!require(mice)){
+    install.packages('mice', repos='http://cran.us.r-project.org')
+    library(mice)
+}
+if(!require(gridExtra)){
+    install.packages('gridExtra', repos='http://cran.us.r-project.org')
+    library(gridExtra)
+}
+if(!require(dunn.test)){
+    install.packages('dunn.test', repos='http://cran.us.r-project.org')
+    library(dunn.test)
+}
+if(!require(GGally)){
+    install.packages('GGally', repos='http://cran.us.r-project.org')
+    library(GGally)
+}
+if(!require(caret)){
+    install.packages('caret', repos='http://cran.us.r-project.org')
+    library(caret)
+}
+if(!require(randomForest)){
+    install.packages('randomForest', repos='http://cran.us.r-project.org')
+    library(randomForest)
+}
+if(!require(reshape2)){
+    install.packages('reshape2', repos='http://cran.us.r-project.org')
+    library(reshape2)
+}
+if(!require(pROC)){
+    install.packages('pROC', repos='http://cran.us.r-project.org')
+    library(pROC)
+}
+if(!require(rpart)){
+    install.packages('rpart', repos='http://cran.us.r-project.org')
+    library(rpart)
+}
+if(!require(rpart.plot)){
+    install.packages('rpart.plot', repos='http://cran.us.r-project.org')
+    library(rpart.plot)
+}
+```
+
+
+
+En primer lugar, vamos a realizar la carga del dataset con los datos de interés sobre los biomarcadores para el diagnóstico temprano del cáncer de pancreas.
+
+```{r message= FALSE, warning=FALSE}
+data <- read.csv("../Data/Debernardi_data.csv",header=T,sep=",")
+attach(data)
+```
+
+
+# Integración y selección de datos
+
+Una vez cargados los datos, analizamos las dimensiones del dataset
+
+```{r}
+dim(data)
+```
+
+Tenemos 590 registros (pacientes) y 14 variables que describen a los diferentes pacientes
+
+```{r}
+str(data)
+```
+
+Las variables de las que disponemos son las siguientes:
+ - **sample_id**: identificador de los pacientes
+ - **patient_cohort**: la cohorte a la que pertenecen los pacientes (cohorte 1 y 2)
+ - **sample_origin**: el hospital o centro de referencia de donde proceden las muestras de los pacientes
+ - **age**: edad de los pacientes
+ - **sex**: sexo de los pacientes
+ - **diagnosis**: diagnóstico de los pacientes (1: sano, 2: tumor benigno, 3: cáncer de pancreas)
+ - **stage**: estadio en el que se encuentra el cáncer
+ - **benign_sample_diagnosis**: resultado de la biopsia de los pacientes con diagnóstico de tumor benigno
+ 
+ Biomarcadores (variables númericas) a estudiar:
+ - **plasma_CA19_9**, **creatinine**, **LYVE1**, **REG1B**, **TFF1** y **REG1A**.
+ 
+Tras observar la información de cada variable podemos saber que tenemos una columna con los identificadores de los pacientes, y tanto variables clasificatorias como númericas, sin embargo se puede observar que las varaibles clasificatorias se han asignado como characters en lugar de factores, por lo que en el siguiente paso deberemos convertir esas variables a factores, de forma que podremos manejar más facilmente la información de esas variables.
+
+```{r}
+columnas_a_factorizar <- c("patient_cohort", "sample_origin", "sex", "diagnosis", "stage", "benign_sample_diagnosis")
+data[columnas_a_factorizar] <- lapply(data[columnas_a_factorizar], factor)
+str(data)
+summary(data)
+```
+
+Vamos a visualizar la distribución de los pacientes del dataset en función del hospital del que proceden las muestras.
+
+```{r}
+ggplot(data,aes(sample_origin))+geom_bar() +labs(y="Patients")+ guides(fill=guide_legend(title="")) + theme(axis.text.x = element_text(angle = 20, hjust = 1)) + ggtitle("origin")
+```
+
+Vamos a seleccionar los pacientes cuyo origen de las muestras es BPTB, LIV o UCL, de forma que excluiremos las que proceden de ESP, ya que de este origen hay pocos pacientes y es el único que no procede de Reino Unido. Por lo que en primer lugar los eliminaremos del análisis por si pudieran haber diferencias según el país de origen de las muestras.
+
+```{r}
+data_procesado <- data %>% filter(sample_origin != "ESP")
+str(data_procesado)
+summary(data_procesado)
+```
+
+```{r}
+ggplot(data_procesado,aes(sample_origin))+geom_bar() +labs(y="Patients")+ guides(fill=guide_legend(title="")) + theme(axis.text.x = element_text(angle = 20, hjust = 1)) + ggtitle("origin")
+```
+
+# Limpieza de los datos
+
+Antes de realizar el análisis de los datos vamos a realizar la limpieza de estos. La limpieza de datos es necesaria para asegurar la precisión y relevancia de los resultados. Además, elimina sesgos y errores, facilitando la interpretación y mejorando la eficiencia del análisis. 
+
+Primero de todo nos vamos a centrar en comprobar si en nuestro dataset existen valores nulos.
+
+```{r}
+sum(is.na(data_procesado))
+```
+
+Vemos como en nuestro dataset ya procesado encontramos 476 valores nulos. Vamos a ahora a buscar más específicamente en que variables se encuentran estos valores nulos.
+
+```{r}
+nulos_por_columna <- sapply(data_procesado, function(x) sum(is.na(x)))
+nulos_por_columna
+```
+
+Ahora vamos a observar cuantas columnas tienen valores vacíos y a que columna corresponden esos valores
+
+```{r}
+sapply(data_procesado, function(x) sum(x == ""))
+data_procesado
+```
+
+Como hemos podido observar hemos encontrado valores vacios o nulos en las variables plasma_CA19_9 (211/561 = 37.61%), en REG1A (265/561 = 47.24%), stage (385/561 = 68.63%) y benign_sample_diagnosis (359/561=63.99%).
+
+Vemos que el porcentaje de nulos para REG1A y plasma_CA19_9 es de 47,24% y 37,61%, respectivamente, así que vamos a probar a imputar los valores faltantes utilizando el método de imputación por la media.
+
+```{r}
+data_imputado <- data_procesado
+media_REG1A <- mean(data_imputado$REG1A, na.rm = TRUE)
+media_plasma_CA19_9 <- mean(data_imputado$plasma_CA19_9, na.rm = TRUE)
+data_imputado$REG1A[is.na(data_imputado$REG1A)] <- media_REG1A
+data_imputado$plasma_CA19_9[is.na(data_imputado$plasma_CA19_9)] <- media_plasma_CA19_9
+```
+
+```{r}
+nulos_por_columna <- sapply(data_imputado, function(x) sum(is.na(x)))
+nulos_por_columna
+```
+
+
+```{r}
+estadisticas_originales1 <- summary(data_procesado$REG1A)
+estadisticas_originales2 <- summary(data_procesado$plasma_CA19_9)
+
+estadisticas_media1 <- summary(data_imputado$REG1A)
+estadisticas_media2 <- summary(data_imputado$plasma_CA19_9)
+
+print(estadisticas_originales1)
+print(estadisticas_media1)
+
+print(estadisticas_originales2)
+print(estadisticas_media2)
+```
+Observamos como la media se mantiene igual en ambos casos, lo cual es de esperar dado que los datos nulos o vacíos se han imputado utilizando la media. También, observamos como hay un cambio significativo en la mediana, de 208.54 a 704.00 y de 26.5 a 523.0. Esto sugiere que la imputación ha alterado sustancialmente la distribución de los datos. Por lo tanto, vamos ahora a probar a imputar los nulos por el método de la mediana.
+
+```{r}
+data_imputado2 <- data_procesado
+mediana_REG1A <- median(data_imputado2$REG1A, na.rm = TRUE)
+mediana_plasma_CA19_9 <- median(data_imputado2$plasma_CA19_9, na.rm = TRUE)
+data_imputado2$REG1A[is.na(data_imputado2$REG1A)] <- mediana_REG1A
+data_imputado2$plasma_CA19_9[is.na(data_imputado2$plasma_CA19_9)] <- mediana_plasma_CA19_9
+```
+
+```{r}
+estadisticas_originales1 <- summary(data_procesado$REG1A)
+estadisticas_originales2 <- summary(data_procesado$plasma_CA19_9)
+
+estadisticas_mediana1 <- summary(data_imputado2$REG1A)
+estadisticas_mediana2 <- summary(data_imputado2$plasma_CA19_9)
+
+print(estadisticas_originales1)
+print(estadisticas_mediana1)
+
+print(estadisticas_originales2)
+print(estadisticas_mediana2)
+
+```
+
+Observamos como la mediana se mantiene igual, lo cual es esperado ya que estamos reemplazando los valores faltantes con la mediana misma. Sin embargo, vemos como hay una disminución notable en la media, de 704.00 a 470.0 y de 654.0 a 418.0. Esto indica que la imputación por la mediana ha reducido la influencia de valores atípicos o extremos altos que estaban elevando la media anteriormente. En este caso, la mediana y la media se han acercado lo que puede ser indicativo de una distribución menos sesgada.
+
+Por último, vamos a probar un método de imputación múltiple usando mice.
+
+```{r}
+mice_method <- make.method(data_procesado)
+mice_method[c("REG1A", "plasma_CA19_9")] <- "pmm"
+
+imputed_data <- mice(data_procesado, method = mice_method, m = 5, seed = 123)
+
+data_imputado_mice <- complete(imputed_data, 1)
+
+```
+
+```{r}
+estadisticas_originales_REG1A <- summary(data_procesado$REG1A)
+estadisticas_originales_plasma_CA19_9 <- summary(data_procesado$plasma_CA19_9)
+
+estadisticas_mice_REG1A <- summary(data_imputado_mice$REG1A)
+estadisticas_mice_plasma_CA19_9 <- summary(data_imputado_mice$plasma_CA19_9)
+
+print(estadisticas_originales_REG1A)
+print(estadisticas_mice_REG1A)
+
+print(estadisticas_originales_plasma_CA19_9)
+print(estadisticas_mice_plasma_CA19_9)
+
+```
+Observamos como para ambas variables, la imputación ha reducido ligeramente la media y la mediana, lo que indica un posible ajuste hacia una distribución más centrada. 
+
+A pesar de la complejidad de análisis de los distintos métodos de imputación (mice sería el más dificil de gestionar) se debe tener en cuenta que es preferible elegir un método de imputación que no distorsione las propiedades estadísticas del conjunto de datos. Dado el tamaño de tu conjunto de datos y la naturaleza de las variables, MICE podría ser preferible, ya que es un método más robusto y versátil que puede manejar mejor la complejidad y los patrones potenciales en los datos faltantes. 
+
+Una vez imputadas estas dos variables usando el método MICE, vamos a estudiar como transformar los nulos/vacíos de las variables stage y benign_sample_diagnosis. Si leemos la descripción del dataset, podemos observar como la variable stage hace referencia al estadio de cáncer (IA, IB, IIA, IIIB, III, IV) por lo cual en los registros de pacientes con diagnósticos de tipo control o patología benigna no aplicaría (dignosis 1 o 2).
+
+```{r}
+registros_filtrados <- subset(data_imputado_mice, diagnosis == 1 | diagnosis == 2)
+numero_de_registros <- nrow(registros_filtrados)
+numero_de_registros
+```
+
+Vemos que el número de registros con diagnósticos control o benignos efectivamente son 385 que es el mismo valor de valores vacíos de stage. En este caso, podemos asumir que esos valor vacíos de stage son fruto no de falta de información sino que en el caso de esos pacientes no se les puede asignar ningun estadio de la enfermedad. Asimismo, vamos a sustituir esos valores vacíos por "No aplica".
+
+
+```{r}
+data_imputado3 <- data_imputado_mice
+data_imputado3$stage <- factor(data_imputado3$stage, levels = c(levels(data_imputado3$stage), "No aplica"))
+data_imputado3$stage[data_imputado3$stage == ""] <- "No aplica"
+valores_unicos_stage <- unique(data_imputado3$stage)
+valores_unicos_stage
+```
+
+```{r}
+table(data_imputado3$stage)
+```
+
+Vemos como efectivamente los 385 valores vacíos se han modificado por "No aplica". 
+
+Por último, vamos a estudiar la variable benign_sample_diagnosis que presentaba 359 valores vacíos. En principio, al ser un procedimiento invasivo una biopsia solo se realizaria a pacientes con una fuerte sospecha de padecer un tumor, por lo tanto, en principio no se realizaria a pacientes control (diagnosis = 1). Por otro lado, un paciente con cáncer es un paciente al cual la biopsia del tumor le ha salido maligna, por lo tanto, no benigna. 
+
+
+```{r}
+registros_filtrados1 <- subset(data_imputado3, diagnosis == 3 |diagnosis == 1)
+numero_de_registros1 <- nrow(registros_filtrados1)
+numero_de_registros1
+```
+
+Si observamos el número de personas con diagnóstico control o cáncer vemos que efectivamente son de 359, el mismo número que el valor de registros vacíos. Al igual que en el anterior caso de stage, la variable benign_sample_diagnosis solo aplicaría en pacientes con un diagnóstico benigno y no en el caso de pacientes con cáncer o control. En esos pacientes, modificaremos la variable benign_sample_diagnosis por un "No aplica". 
+
+```{r}
+data_imputado4 <- data_imputado3
+data_imputado4$benign_sample_diagnosis <- factor(data_imputado4$benign_sample_diagnosis, levels = c(levels(data_imputado4$benign_sample_diagnosis), "No aplica"))
+data_imputado4$benign_sample_diagnosis[data_imputado4$benign_sample_diagnosis == ""] <- "No aplica"
+valores_unicos_stage <- unique(data_imputado4$benign_sample_diagnosis)
+valores_unicos_stage
+```
+
+```{r}
+table(data_imputado4$benign_sample_diagnosis)
+```
+
+Vemos como los 359 datos vacíos se han imputado con "No aplica" en la variable benign_sample_diagnosis.
+
+Una vez imputados los valores vacíos y nulos, vamos a centrarnos en el estudio de los valores atípicos de nuestras variables numéricas. Primero vamos a estudiar las variables haciendo un boxplot.
+
+```{r}
+melted_data <- reshape2::melt(data_imputado4)
+ggplot(melted_data, aes(x = variable, y = value)) + 
+    geom_boxplot() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+ggplot(data_imputado4, aes(x = diagnosis, y = age)) + 
+    geom_boxplot() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r}
+ggplot(data_imputado4, aes(x = diagnosis, y = plasma_CA19_9)) + 
+    geom_boxplot() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(data_imputado4, aes(x = diagnosis, y = creatinine)) + 
+    geom_boxplot() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(data_imputado4, aes(x = diagnosis, y = LYVE1)) + 
+    geom_boxplot() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(data_imputado4, aes(x = diagnosis, y = REG1A)) + 
+    geom_boxplot() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(data_imputado4, aes(x = diagnosis, y = REG1B)) + 
+    geom_boxplot() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+ggplot(data_imputado4, aes(x = diagnosis, y = TFF1)) + 
+    geom_boxplot() + 
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Observamos como valores atípicos son visibles como puntos que se encuentran fuera del rango de las "cajas" y "bigotes" (whiskers) típicos en los gráficos de caja. Con este gráficos, nos podemos hacer una idea general de que encontraremos valores atípicos en alguna de la variables.
+
+Vamos a estudiar los valores atípicos siguiendo dos métodos: la distancia de Mahalanobis y el rango intercuartílico (IQR). Primero probaremos con el método IQR:
+
+```{r}
+atipicos <- lapply(data_imputado4, function(x) {
+    if (is.numeric(x)) {
+        IQR_value <- IQR(x, na.rm = TRUE)
+        Q1 <- quantile(x, 0.25, na.rm = TRUE)
+        Q3 <- quantile(x, 0.75, na.rm = TRUE)
+        return(x < (Q1 - 1.5 * IQR_value) | x > (Q3 + 1.5 * IQR_value))
+    } else {
+        return(rep(FALSE, length(x)))
+    }
+})
+num_atipicos_por_columna <- sapply(atipicos, sum, na.rm = TRUE)
+num_atipicos_por_columna
+```
+
+Ahora vamos calcular la distancia de Mahalanobis:
+
+```{r}
+# Seleccionar solo columnas numéricas
+data_numeric <- data_imputado4[sapply(data_imputado4, is.numeric)]
+
+cov_matrix <- cov(data_numeric, use = "complete.obs")
+means <- colMeans(data_numeric, na.rm = TRUE)
+
+# Calcular la distancia de Mahalanobis 
+mahalanobis_distances <- mahalanobis(data_numeric, center = means, cov = cov_matrix)
+
+# Determinar el umbral usando la distribución chi-cuadrada con el número de variables numéricas
+threshold <- qchisq(0.95, df = ncol(data_numeric))
+
+outliers <- mahalanobis_distances > threshold
+num_outliers <- sum(outliers)
+num_outliers
+```
+
+```{r}
+outliers_data <- data_imputado4[outliers, ]
+outliers_data
+```
+
+Podemos observar como los resultados han sido diferentes para ambos métodos. Eso es debido a que, por un lado, la distancia de Mahalanobis tiene en cuenta la correlación entre todas las variables numéricas del conjunto de datos y calcula una distancia multivariante mientras que, el método IQR evalúa los valores atípicos de manera univariante, es decir, para cada variable de forma independiente. Cuando un valor está fuera del rango definido por 1.5 veces el IQR, por encima del tercer cuartil o por debajo del primer cuartil, se considera un valor atípico para esa variable específica.
+
+La distancia de Mahalanobis es una técnica multivariante que identifica valores atípicos considerando la correlación entre todas las variables, adecuada para datos donde las variables interactúan en la detección de eventos complejos como el diagnóstico médico. Creemos que para tareas predictivas como diferenciar entre pacientes sanos, con condiciones pancreáticas no cancerosas y con Adenocarcinoma Ductal de Páncreas, donde se espera que los biomarcadores estén interrelacionados, la distancia de Mahalanobis podría ser un mejor indicador.
+
+```{r}
+zero_values <- sapply(data_imputado4, function(x) any(x == 0, na.rm = TRUE))
+columns_with_zeros <- names(zero_values[zero_values])
+print(columns_with_zeros)
+
+```
+
+
+En este caso, vamos a considerar que los valores atípicos son extremos pero legítimos, así que en vez de eliminarlos vamos a transformar los datos para reducir su impacto. En nuestro caso, hemos elegido la transformación logarítmica ya que todos nuestros datos son positivos.
+
+```{r}
+data_cleaned <- data_imputado4
+for (colname in names(data_cleaned)) {
+    if (is.numeric(data_cleaned[[colname]])) {
+        if (all(data_cleaned[[colname]] > 0)) {
+            data_cleaned[[colname]] <- log(data_cleaned[[colname]])
+        } else {
+            # Opción alternativa: log(x + 1) para manejar valores de 0
+            data_cleaned[[colname]] <- log(data_cleaned[[colname]] + 1)
+        }
+    }
+}
+
+```
+
+```{r}
+summary(data_cleaned)
+```
+
+```{r}
+write.csv(data_cleaned, file = "../Data/data_cleaned.csv")
+```
+
+# Análisis de los datos
+
+Antes de realizar los test estadísticos sobre los datos debemos conocer la distribución que presentan para determinar que test estadísticos aplicar. Puesto que lo que nos interesa es analizar la expresión de los diferentes biomarcadores en los diferentes grupos de pacientes que tenemos para comprobar si alguno de estos biomarcadores podrían emplearse para un diagnostico más temprano de la enfermedad, en primer lugar vamos a analizar si los diferentes grupos de diagnóstico para los diferentes biomarcadores presentan una distribución normal. 
+
+## Pruebas de normalidad
+
+### Diagnosis
+
+```{r}
+norm_test <- function(x) {
+  for (i in seq_along(x)) {
+  cat("Grupo", names(x)[i])
+  print(x[[i]])
+  cat("\n")
+  }
+}
+```
+
+```{r}
+variables <- c("age", "plasma_CA19_9", "creatinine", "LYVE1", "REG1A", "TFF1", "REG1B")
+
+for (var in variables) {
+  grupos_var <- split(data_cleaned[[var]], data_cleaned$diagnosis)
+
+  # Realizar la prueba de Shapiro-Wilk para cada grupo
+  normalidad_var <- lapply(grupos_var, shapiro.test)
+  
+  cat("->", var, "\n")
+  norm_test(normalidad_var)
+}
+```
+
+```{r}
+dist_CA19 <- ggplot(data_cleaned, aes(x = plasma_CA19_9, fill = diagnosis)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "plasma_CA19_9", x = "Datos", y = "Densidad") +
+  scale_fill_manual(values = c("blue", "red", "green"))
+
+dist_creatinine <- ggplot(data_cleaned, aes(x = creatinine, fill = diagnosis)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "creatinine", x = "Datos", y = "Densidad") +
+  scale_fill_manual(values = c("blue", "red", "green"))
+
+dist_LYVE1 <- ggplot(data_cleaned, aes(x = LYVE1, fill = diagnosis)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "LYVE1", x = "Datos", y = "Densidad") +
+  scale_fill_manual(values = c("blue", "red", "green"))
+
+dist_REG1A <- ggplot(data_cleaned, aes(x = REG1A, fill = diagnosis)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "REG1A", x = "Datos", y = "Densidad") +
+  scale_fill_manual(values = c("blue", "red", "green"))
+
+dist_TFF1 <- ggplot(data_cleaned, aes(x = TFF1, fill = diagnosis)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "TFF1", x = "Datos", y = "Densidad") +
+  scale_fill_manual(values = c("blue", "red", "green"))
+
+dist_REG1B <- ggplot(data_cleaned, aes(x = REG1B, fill = diagnosis)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "REG1B", x = "Datos", y = "Densidad") +
+  scale_fill_manual(values = c("blue", "red", "green"))
+
+grid.arrange(dist_CA19,dist_creatinine, dist_LYVE1, dist_REG1A, dist_TFF1, dist_REG1B, ncol=2)
+```
+
+Puesto que los p-valor son menores de 0.05 se debe rechazar la hipótesis nula y por tanto podemos decir que no siguen una distribución normal. Por lo tanto para analizar las diferencias estadísticas en la expresión de estos biomarcadores entre los diferentes grupos de pacientes deberemos emplear métodos estadísticos no paramátricos, como la prueba de Kruskal-Wallis. Esta prueba es una extensión no paramétrica del análisis de varianza (ANOVA), y se utiliza para comparar las medianas de tres o más grupos independientes. La hipótesis nula es que las medianas son iguales en todos los grupos. 
+
+
+### Stage
+
+Como vamos a querer analizar las diferencias de los biomarcadores entre los diferentes estadíos de la enfermedad y los pacientes control y el grupo de tumores benignos vamos a generar una nueva variable que incluya el diagnostico para los grupos 1 y 2, y los estadios de los pacientes del grupo 3.
+
+```{r}
+data_stage <- subset(data_cleaned, diagnosis == "3")
+data_stage_diag <- data_cleaned
+data_stage_diag$stage_proc <- NA
+data_stage_diag$stage_proc[data_stage_diag$diagnosis == 1] <- "1"
+data_stage_diag$stage_proc[data_stage_diag$diagnosis == 2] <- "2"
+data_stage_diag$stage_proc[data_stage_diag$stage == "IA"] <- "IA"
+data_stage_diag$stage_proc[data_stage_diag$stage == "IB"] <- "IB"
+data_stage_diag$stage_proc[data_stage_diag$stage == "IIA"] <- "IIA"
+data_stage_diag$stage_proc[data_stage_diag$stage == "IIB"] <- "IIB"
+data_stage_diag$stage_proc[data_stage_diag$stage == "III"] <- "III"
+data_stage_diag$stage_proc[data_stage_diag$stage == "IV"] <- "IV"
+```
+
+```{r}
+for (var in variables) {
+  # Dividir el data frame por grupos
+  grupos_var <- split(data_cleaned[[var]], data_stage_diag$stage_proc)
+
+  # Realizar la prueba de Shapiro-Wilk para cada grupo
+  normalidad_var <- lapply(grupos_var, shapiro.test)
+  
+  cat("->", var, "\n")
+  # Mostrar los resultados
+  norm_test(normalidad_var)
+}
+```
+
+En la mayoría de las ocasiones el p-valor es menor de 0.05 por lo que los grupos no siguen una distribución normal y por ello para analizar las diferencias estadísticas vamos a emplear un test no paramétrico.
+
+```{r}
+dist_CA19 <- ggplot(data_stage_diag, aes(x = plasma_CA19_9, fill = stage_proc)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "plasma_CA19_9", x = "Datos", y = "Densidad")
+
+dist_creatinine <- ggplot(data_stage_diag, aes(x = creatinine, fill = stage_proc)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "creatinine", x = "Datos", y = "Densidad")
+
+dist_LYVE1 <- ggplot(data_stage_diag, aes(x = LYVE1, fill = stage_proc)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "LYVE1", x = "Datos", y = "Densidad") 
+
+dist_REG1A <- ggplot(data_stage_diag, aes(x = REG1A, fill = stage_proc)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "REG1A", x = "Datos", y = "Densidad") 
+
+dist_TFF1 <- ggplot(data_stage_diag, aes(x = TFF1, fill = stage_proc)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "TFF1", x = "Datos", y = "Densidad") 
+
+dist_REG1B <- ggplot(data_stage_diag, aes(x = REG1B, fill = stage_proc)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "REG1B", x = "Datos", y = "Densidad")
+  
+
+dist_CA19
+dist_creatinine
+dist_LYVE1
+dist_REG1A
+dist_TFF1
+dist_REG1B
+```
+
+## Prueba Kruskal Wallis
+
+### Biomarcadores vs Grupo diagnóstico
+
+```{r}
+for (var in variables) {
+  formula <- as.formula(paste(var, "~ diagnosis"))
+  result <- kruskal.test(formula, data = data_cleaned)
+  cat("->", var, "\n")
+  print(result)
+  cat("\n")
+}
+```
+
+Como se puede observar hay diferencias significativas en todas las variables analizadas excepto para la creatinina. Sin embargo, para saber entre qué grupos de pacientes específicos existen diferencias significativas se deben hacer comparaciones post hoc. Para ello debemos utilizar pruebas adicionales, siendo una de las más comunes las comparaciones múltiples de Dunn.
+
+
+```{r}
+for (var in variables) {
+  # Realiza pruebas de comparaciones múltiples de Dunn
+  cat("->", var, "\n")
+  dunn.test(data_cleaned[[var]], g = data_cleaned$diagnosis, method = "bonferroni")
+  cat("\n")
+}
+```
+
+Tras obtener los resultados de las comparaciones estadísticas entre los 3 grupos de diagnostico del dataset podemos decir que:
+
+ - Age: El grupo 3 es diferente de los grupos control y de los pacientes con tumores benignos
+
+ - Plasma_CA19_9: es significativamente diferente entre los 3 grupos de estudio entre sí.
+
+ - Creatinine: no hay diferencias entre ninguno de los grupos
+
+ - LYVE1: hay diferencias significativas entre los 3 grupos del estudio entre sí.
+
+ - REG1A: hay diferencias significativas entre los 3 grupos del estudio entre sí.
+
+ - TFF1: hay diferencias significativas entre los 3 grupos del estudio entre sí.
+
+ - REG1B: El grupo 3 es diferente de los grupos control y de los pacientes con tumores benignos
+
+
+### Biomarcadores vs stage
+
+```{r}
+for (var in variables) {
+  formula <- as.formula(paste(var, "~ stage_proc"))
+  result <- kruskal.test(formula, data = data_stage_diag)
+  cat("->", var, "\n")
+  print(result)
+  cat("\n")
+}
+```
+
+```{r}
+for (var in variables) {
+  # Realiza pruebas de comparaciones múltiples de Dunn
+  cat("->", var, "\n")
+  dunn.test(data_stage_diag[[var]], g = data_stage_diag$stage_proc, method = "bonferroni")
+  cat("\n")
+}
+```
+
+ - Age: Los grupos de estadios IB, IIB y III son diferentes significativamente a los grupos control y de los pacientes con tumores benignos, y no hay diferencias entre los diferentes estadios.
+
+ - Plasma_CA19_9: los pacientes con tumores benignos, y a partir del estadio IIA son estadísticamente diferentes a los pacientes control, y a partir del estadio IIB también con los pacientes con tumores benignos.
+
+ - Creatinine: no hay diferencias entre ninguno de los grupos
+
+ - LYVE1: los pacientes con tumores benignos, y a partir del estadio IIA son estadísticamente diferentes a los pacientes control, y a partir del estadio IIB también con los pacientes con tumores benignos.
+
+ - REG1A: los pacientes en estadio IB y a partir del IIB son significativamente diferentes tanto a los pacientes control como a los pacientes con tumores benignos
+
+ - TFF1: los pacientes con tumores benignos, y a partir del estadio IIA son estadísticamente diferentes a los pacientes control, y a partir del estadio IIB también con los pacientes con tumores benignos.
+
+ - REG1B: los pacientes a partir del estadio IIA son estadísticamente diferentes a los pacientes control, y a partir del estadio IIB también con los pacientes con tumores benignos.
+ 
+```{r}
+ggplot(data_stage, aes(x = stage, y = plasma_CA19_9, fill = stage)) +
+  geom_boxplot() +
+  labs(title = "plasma_CA19_9", x = "Stage", y = "plasma_CA19_9") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage, aes(x = stage, y = creatinine, fill = stage)) +
+  geom_boxplot() +
+  labs(title = "creatinine", x = "Stage", y = "creatinine") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage, aes(x = stage, y = LYVE1, fill = stage)) +
+  geom_boxplot() +
+  labs(title = "LYVE1", x = "Stage", y = "LYVE1") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage, aes(x = stage, y = REG1A, fill = stage)) +
+  geom_boxplot() +
+  labs(title = "REG1A", x = "Stage", y = "REG1A") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage, aes(x = stage, y = TFF1, fill = stage)) +
+  geom_boxplot() +
+  labs(title = "TFF1", x = "Stage", y = "TFF1") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage, aes(x = stage, y = REG1B, fill = stage)) +
+  geom_boxplot() +
+  labs(title = "REG1B", x = "Stage", y = "REG1B") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage_diag, aes(x = stage_proc, y = plasma_CA19_9, fill = diagnosis)) +
+  geom_boxplot() +
+  labs(title = "plasma_CA19_9", x = "Stage", y = "plasma_CA19_9") +
+  theme_minimal()
+```
+```{r}
+ggplot(data_stage_diag, aes(x = stage_proc, y = creatinine, fill = diagnosis)) +
+  geom_boxplot() +
+  labs(title = "creatinine", x = "Stage", y = "creatinine") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage_diag, aes(x = stage_proc, y = LYVE1, fill = diagnosis)) +
+  geom_boxplot() +
+  labs(title = "LYVE1", x = "Stage", y = "LYVE1") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage_diag, aes(x = stage_proc, y = REG1A, fill = diagnosis)) +
+  geom_boxplot() +
+  labs(title = "REG1A", x = "Stage", y = "REG1A") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage_diag, aes(x = stage_proc, y = TFF1, fill = diagnosis)) +
+  geom_boxplot() +
+  labs(title = "TFF1", x = "Stage", y = "TFF1") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_stage_diag, aes(x = stage_proc, y = REG1B, fill = diagnosis)) +
+  geom_boxplot() +
+  labs(title = "REG1B", x = "Stage", y = "REG1B") +
+  theme_minimal()
+```
+
+En general se puede observar en las gráficas como la expresión de los diferentes biomarcadores va aumnentando conforme avanzan los estadios de la enfermedad, y en algunos también con respecto a los pacientes control y con tumores benignos, como se ha podido comprobar en el estudio estadístico en cuanto a las diferencias entre los diferentes grupos.
+
+## Correlaciones
+
+En primer luegar vamos a analizar la distribución de las variables para saber que tipo de análisis de las correlaciones debemos emplear:
+
+```{r}
+for (var in variables) {
+  cat("->", var, "\n")
+  shapiro_test_result <- shapiro.test(data_cleaned[[var]])
+  print(shapiro_test_result)
+  cat("\n")
+}
+
+```
+
+De nuevo observamos que el resultado del test Shapiro es significativo por lo que se rechaza la hipótesis nula, determinando que las variables no siguen una distribución normal. Por lo tanto para el analisis de las correlaciones emplearemos la correlación de Spearman. El coeficiente de correlación de Spearman es una medida no paramétrica que evalúa la relación monótona entre dos variables continuas o ordinales y, a diferencia de la correlación de Pearson, no asume que la relación entre las variables es lineal ni que las variables están distribuidas normalmente.
+
+```{r}
+data_numeric <- data_cleaned[sapply(data_cleaned, is.numeric)]
+correlation_matrix <- cor(data_numeric, method = "spearman")
+```
+
+```{r}
+ggcorr(data_numeric, low = "turquoise4", mid = "white", high = "brown4", nbreaks=10, hjust = 0.75, label = TRUE)
+```
+
+El análisis de correlación de Spearman muestra relaciones positivas moderadas entre algunas varaibles. REG1B muestra una correlación más significativa tanto con plasma_CA19_9 como con LYVE1 (0.5 y 0.6, respectivamente), indicando una tendencia positiva conjunta notable entre estas mediciones. Además, plasma_CA19_9 y creatinina también exhiben una correlación positiva moderada (0.5).
+
+```{r}
+data_numeric2 <- data_cleaned[, sapply(data_cleaned, is.numeric) & names(data_cleaned) != "age"]
+ggpairs(data_numeric2, mapping = aes(color = as.factor(data_cleaned$diagnosis)), progress = FALSE)
+```
+
+
+# Visualización de los datos
+
+## Distribuciones
+
+### Distribución de los pacientes por cohorte
+
+```{r}
+ggplot(data_cleaned, aes(x = patient_cohort, fill = diagnosis)) +
+  geom_bar() +
+  labs(title = "Cantidad de Pacientes por cohorte", x = "Diagnóstico", y = "Número de Pacientes") +
+  theme_minimal()
+```
+
+### Distribución de los pacientes por sample_origin
+
+```{r}
+ggplot(data_cleaned, aes(x = patient_cohort, fill = sample_origin)) +
+  geom_bar() +
+  labs(title = "Cantidad de Pacientes por sample_origin", x = "Diagnóstico", y = "Número de Pacientes") +
+  theme_minimal()
+```
+
+### Distribución de los pacientes por sexo
+
+```{r}
+ggplot(data_cleaned, aes(x = sex, fill = diagnosis)) +
+  geom_bar() +
+  labs(title = "Cantidad de Pacientes por sample_origin", x = "Diagnóstico", y = "Número de Pacientes") +
+  theme_minimal()
+
+ggplot(data_cleaned, aes(x = diagnosis, fill = sex)) +
+  geom_bar() +
+  labs(title = "Cantidad de Pacientes por sample_origin", x = "Diagnóstico", y = "Número de Pacientes") +
+  theme_minimal()
+```
+
+### Distribución de los pacientes por stage
+
+```{r}
+ggplot(data_cleaned, aes(x = sex, fill = stage)) +
+  geom_bar() +
+  labs(title = "Cantidad de Pacientes por sample_origin", x = "Diagnóstico", y = "Número de Pacientes") +
+  theme_minimal()
+
+ggplot(data_cleaned, aes(x = stage, fill = sex)) +
+  geom_bar() +
+  labs(title = "Cantidad de Pacientes por sample_origin", x = "Diagnóstico", y = "Número de Pacientes") +
+  theme_minimal()
+```
+
+## Biomarcadores vs Diagnostico y sexo
+
+```{r}
+ggplot(data_cleaned, aes(x = diagnosis, y = plasma_CA19_9, fill = sex)) +
+  geom_boxplot() +
+  labs(title = "plasma_CA19_9", x = "Diagnóstico", y = "plasma_CA19_9") +
+  theme_minimal()
+```
+```{r}
+ggplot(data_cleaned, aes(x = diagnosis, y = creatinine, fill = sex)) +
+  geom_boxplot() +
+  labs(title = "creatinine", x = "Diagnóstico", y = "creatinine") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_cleaned, aes(x = diagnosis, y = LYVE1, fill = sex)) +
+  geom_boxplot() +
+  labs(title = "LYVE1", x = "Diagnóstico", y = "LYVE1") +
+  theme_minimal()
+```
+```{r}
+ggplot(data_cleaned, aes(x = diagnosis, y = REG1A, fill = sex)) +
+  geom_boxplot() +
+  labs(title = "REG1A", x = "Diagnóstico", y = "REG1A") +
+  theme_minimal()
+```
+```{r}
+ggplot(data_cleaned, aes(x = diagnosis, y = TFF1, fill = sex)) +
+  geom_boxplot() +
+  labs(title = "TFF1", x = "Diagnóstico", y = "TFF1") +
+  theme_minimal()
+```
+
+```{r}
+ggplot(data_cleaned, aes(x = diagnosis, y = REG1B, fill = sex)) +
+  geom_boxplot() +
+  labs(title = "REG1B", x = "Diagnóstico", y = "REG1B") +
+  theme_minimal()
+```
+
+De forma general según se puede ver en las gráficas parece que los pacientes de sexo masculino presentan una mayor expresión de los diferentes biomarcadores con respecto al sexo femenino.
+
+
+#Predicciones: Random Forest
+
+En el estudio de los biomarcadores para la detección del cáncer de páncreas, se ha utilizado el modelo de Random Forest debido a su habilidad para manejar una gran cantidad de variables de entrada y su robustez frente a los conjuntos de datos con posibles correlaciones entre dichas variables. Esta metodología es particularmente útil en contextos biomédicos donde la interacción entre múltiples factores biológicos es compleja y donde es crucial no solo hacer predicciones precisas, sino también entender qué variables aportan más a esas predicciones.
+
+
+```{r}
+cols <- c("age", "sex", "plasma_CA19_9", "creatinine", "LYVE1", "REG1A", "TFF1", "REG1B", "diagnosis")
+data_selected <- data_cleaned[, cols]
+data_selected$sex <- as.numeric(as.factor(data_selected$sex))
+
+set.seed(42)
+indice <- createDataPartition(data_selected$diagnosis, p = 0.8, list = FALSE)
+train_data <- data_selected[indice, ]
+test_data <- data_selected[-indice, ]
+
+X_train <- train_data[, !(names(train_data) %in% 'diagnosis')]
+y_train <- train_data$diagnosis
+X_test <- test_data[, !(names(test_data) %in% 'diagnosis')]
+y_test <- test_data$diagnosis
+
+summary(data_selected)
+summary(X_train)
+summary(y_train)
+```
+
+Como se puede observar se mantienen las proporciones de las diferentes clases y la distribución en la partición del dataset para hacer el train del modelo.
+
+```{r}
+# Entrenar el modelo de Random Forest
+set.seed(239)
+
+modelo_rf <- randomForest(x = X_train, y = y_train, ntree = 100, mtry = 2, importance = TRUE)
+print(modelo_rf)
+
+predicciones_rf <- predict(modelo_rf, X_test)
+
+# Calcular y mostrar la precisión
+conf_matrix <- confusionMatrix(predicciones_rf, y_test)
+print(conf_matrix)
+
+
+# Mostrar importancia de las características
+varImpPlot(modelo_rf)
+
+```
+
+
+Al aplicar el modelo de Random Forest a nuestros datos, hemos podido evaluar y cuantificar la importancia de distintos biomarcadores, sexo y edad en la diferenciación entre individuos sanos (clase 1), pacientes con enfermedades benignas (clase 2) y pacientes diagnosticados con cáncer de páncreas (clase 3). Los resultados han mostrado una precisión general del 70.27%, lo cual es significativamente superior al No Information Rate y demuestra que el modelo tiene una capacidad predictiva considerable. Además, las métricas de sensibilidad y especificidad sugieren que el modelo es especialmente eficaz para identificar correctamente a los pacientes con cáncer de páncreas (clase 3), lo cual es de gran relevancia clínica para el diagnóstico precoz y la intervención oportuna.
+
+
+```{r}
+importancia <- importance(modelo_rf)
+
+importancia_df <- data.frame(Variable = row.names(importancia), Importancia = importancia[, 1])
+
+# Ordenar por importancia
+importancia_df <- importancia_df[order(importancia_df$Importancia, decreasing = TRUE), ]
+
+ggplot(importancia_df, aes(x = reorder(Variable, Importancia), y = Importancia)) +
+  geom_bar(stat = "identity", fill = "red") +
+  coord_flip() +  
+  xlab("Importancia") +
+  ylab("Variables") +
+  ggtitle("Importancia de las Características")
+```
+
+A través del análisis de la importancia de las variables, se ha descubierto que ciertos biomarcadores (plasma_CA19_19, TFF1 y LYVE1) destacan en su contribución a la clasificación realizada por el modelo.
+
+A continuación, hemos optimizado el modelo de Random Forest para mejorar su capacidad de predecir con precisión diferentes estados de enfermedad en el contexto del cáncer de páncreas. La optimización se realiza mediante una búsqueda en cuadrícula que ajusta el hiperparámetro mtry, que es el número de variables consideradas en cada división de los árboles del bosque con el objetivo de encontrar el valor óptimo que maximiza la precisión del modelo en los datos de validación cruzada, evitando así el sobreajuste y mejorando la generalización del modelo a nuevos datos.
+
+```{r}
+
+set.seed(345)
+indice <- createDataPartition(data_selected$diagnosis, p = 0.8, list = FALSE)
+train_data <- data_selected[indice, ]
+test_data <- data_selected[-indice, ]
+
+X_train <- train_data[, !(names(train_data) %in% 'diagnosis')]
+y_train <- train_data$diagnosis
+X_test <- test_data[, !(names(test_data) %in% 'diagnosis')]
+y_test <- test_data$diagnosis
+
+# Configurar el control de entrenamiento
+control <- trainControl(method = "cv", number = 10)
+
+grid <- expand.grid(mtry = seq(2, sqrt(ncol(X_train)), by = 2))
+
+modelo_rf_optimizado <- train(x = X_train, y = y_train,
+                              method = "rf",
+                              trControl = control,
+                              tuneGrid = grid,
+                              metric = "Accuracy")
+
+print(modelo_rf_optimizado$bestTune)
+
+# Entrenar el modelo final con los mejores parámetros (mtry)
+modelo_final <- randomForest(x = X_train, y = y_train, 
+                             ntree = 100,  # Usar un valor fijo para ntree
+                             mtry = modelo_rf_optimizado$bestTune$mtry)
+
+# Hacer predicciones y evaluar el modelo
+predicciones_rf_optimizado <- predict(modelo_final, X_test)
+conf_matrix_optimizado <- confusionMatrix(predicciones_rf_optimizado, y_test)
+
+# Mostrar la matriz de confusión y la precisión del modelo optimizado
+print(conf_matrix_optimizado)
+```
+
+```{r}
+# Mostrar la importancia de las variables
+importancia <- importance(modelo_final)
+print(importancia)
+
+# Visualizar la importancia de las variables
+varImpPlot(modelo_final)
+```
+
+```{r}
+importancia <- importance(modelo_final)
+
+importancia_df <- data.frame(Variable = row.names(importancia), Importancia = importancia[, 1])
+
+# Ordenar por importancia
+importancia_df <- importancia_df[order(importancia_df$Importancia, decreasing = TRUE), ]
+
+ggplot(importancia_df, aes(x = reorder(Variable, Importancia), y = Importancia)) +
+  geom_bar(stat = "identity", fill = "red") +
+  coord_flip() +
+  xlab("Importancia") +
+  ylab("Variables") +
+  ggtitle("Importancia de las Características")
+```
+
+Una vez optimizado, el modelo de clasificación muestra una precisión del 73.87%, siendo especialmente eficaz en identificar pacientes con cáncer de páncreas (Clase 3) con una sensibilidad del 89.47%. La precisión balanceada es alta en todas las clases, lo que indica que el modelo es equilibrado y confiable. Los biomarcadores LYVE1, TFF1 y plasma_CA19_9 se destacan como los más relevantes, lo que sugiere su potencial como indicadores clave en el diagnóstico y seguimiento del cáncer de páncreas. Estos resultados apoyan la utilidad del modelo para mejorar la detección temprana de esta enfermedad.
+
+Ahora vamos a realizar un árbol de decisión para predecir el diagnóstico de cáncer de páncreas basado en las características de los pacientes, como la edad, el sexo y los niveles de biomarcadores. El árbol de decisión divide el conjunto de datos en ramas y nodos de decisión, lo que permite establecer reglas claras para la toma de decisiones ayudando a identificar patrones y características importantes que influyen en el diagnóstico y a desarrollar un modelo predictivo útil.
+
+```{r}
+# Dividimos los datos en entrenamiento y prueba
+set.seed(67)  # Para reproducibilidad
+train_index <- createDataPartition(data_selected$diagnosis, p = 0.8, list = FALSE)
+train_data <- data_selected[train_index, ]
+test_data <- data_selected[-train_index, ]
+
+arbol_decision <- rpart(diagnosis ~ ., data = train_data, method = "class")
+
+rpart.plot(arbol_decision, main="Árbol de Decisión para el Diagnóstico del Cáncer de Páncreas", extra=102)
+
+```
+
+Ahora vamos a calcular las métricas de rendimiento para predecir la clase 3 (cáncer de páncreas)
+
+```{r}
+predicciones <- predict(arbol_decision, test_data, type = "class")
+conf_matrix <- table(predicciones, test_data$diagnosis)
+
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+
+sensitivity <- conf_matrix[3, 3] / sum(conf_matrix[3, ])
+
+specificity <- (conf_matrix[1, 1] + conf_matrix[2, 2]) / (sum(conf_matrix[1, ]) + sum(conf_matrix[2, ]))
+
+
+cat("Precisión:", accuracy, "\n")
+cat("Sensibilidad (Recall):", sensitivity, "\n")
+cat("Especificidad:", specificity, "\n")
+
+
+```
+
+También, vamos a calcular el área bajo la curva ROC que es una métrica utilizada para evaluar la capacidad de un modelo en la clasificación. Varía de 0 a 1, donde 0.5 indica una capacidad de discriminación aleatoria, y valores cercanos a 1 indican una alta capacidad de discriminación para separar una clase específica de las demás. 
+
+```{r}
+# Calcular el área bajo la curva ROC (AUC-ROC) para la clase 3 frente a la 1 y 2
+roc_obj <- roc(response = ifelse(test_data$diagnosis == 3, 1, 0),
+               predictor = ifelse(predicciones_rf_optimizado == 3, 1, 0))
+auc_roc <- auc(roc_obj)
+
+plot(roc_obj, main = "Curva ROC para la Clase 3 vs Otras Clases")
+
+cat("Área bajo la Curva ROC (AUC-ROC) para la Clase 3 vs Otras Clases:", auc_roc, "\n")
+
+```
+
+El modelo tiene un buen desempeño en la clasificación de los pacientes con una sensibilidad del 71.1% y un AUC-ROC de 0.847, lo que indica su capacidad para distinguir casos de cáncer de otros. Sin embargo, la precisión general es del 61.3%, lo que sugiere cierta proporción de predicciones incorrectas y además tiene una especificidad bastante baja con un 54.5% . Vamos ahora a visualizar las reglas para clasificar un diagnóstico de cáncer de páncreas según el modelo de árbol de decisión.
+
+```{r}
+print(arbol_decision)
+```
+
+
+Al imprimir las reglas del árbol de decisión vemos que las que hacen referencia a la clase 3 son:
+  
+       11) age>=4.016342 42  23 3 (0.14285714 0.40476190 0.45238095)  
+          45) LYVE1>=1.875298 7   1 3 (0.14285714 0.00000000 0.85714286) *
+        23) creatinine< -0.616322 8   0 3 (0.00000000 0.00000000 1.00000000) *
+   3) plasma_CA19_9>=3.983917 165  53 3 (0.06060606 0.26060606 0.67878788)  
+     7) LYVE1>=-1.460234 148  37 3 (0.04054054 0.20945946 0.75000000) *
+
+Cabe destacar que los valores tanto de los marcadores como de la edad de los pacientes están normalizados con el logaritmo, por lo que habrá que tener esto en cuenta a lahora de considerar los valores de corte que proporciona el modelo.
+  
+El análisis de las reglas del árbol de decisión revela la importancia de ciertas variables en la clasificación del cáncer de páncreas (Clase 3). La regla "age>=4.016342" destaca que la edad juega un papel en la clasificación, pero con una precisión moderada del 45.24%, lo que significa que no es definitiva, al igual que la regla "plasma_CA19_9>=3.983917" que tiene una precisión de 67.88%. Por otro lado, la regla "LYVE1>=1.875298" muestra una alta precisión del 85.71%, lo que sugiere que LYVE1 es un indicador eficaz de cáncer de páncreas en las observaciones que cumplen con esta condición. Asimismo, la regla "LYVE1>=-1.460234", en otro de los nodos del árbol, presenta una buena precisión del 75.00%, lo que las convierte a ambas en buenas herramientas para identificar casos de cáncer de páncreas.
+
+En términos de concordancia, parece que hay una consistencia entre los dos métodos respecto a la relevancia de algunas variables. La "edad" y "creatinina" también parecen ser importantes en el árbol de decisión aunque no aparecen en la parte superior del gráfico de Random Forest, lo que podría indicar diferencias en cómo cada modelo mide la importancia o en la estructura de los datos que cada modelo está analizando. En un modelo de Random Forest se mide típicamente por cuánto mejora la predicción (o reduce la impureza) una característica cuando se utiliza en los árboles dentro del modelo. Por otro lado, la precisión de una regla en el árbol de decisión se refiere a qué porcentaje de las veces esa regla lleva a una clasificación correcta.
+
+La evaluación comparativa de los dos modelos revela que el Random Forest supera en términos generales al árbol de decisión, mostrando mayor precisión y un mejor balance entre la capacidad de identificar correctamente los casos positivos (sensibilidad) y la capacidad de identificar correctamente los casos negativos (especificidad). No obstante, el árbol de decisión demuestra una mayor sensibilidad para detectar específicamente la Clase 3. Esto es significativo en situaciones médicas donde identificar cada posible caso de la Clase 3 es necesario para evitar consecuencias graves por no diagnosticar un caso verdadero, que sería el caso que estamos planteando.
+
+Aunque las estadísticas de rendimiento indican que las variables señaladas como significativas en el modelo de Random Forest están teniendo un impacto positivo en su capacidad predictiva, estas métricas no nos ofrecen una imagen clara de la contribución exacta de cada variable. 
+
+
+
+
